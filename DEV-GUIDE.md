@@ -675,3 +675,201 @@ feedback. Doing so results in an inability to see what has changed between
 revisions of the PR. Instead submit additional commits until the PR is
 suitable for merging. Once the PR is suitable for merging, the commits will
 be squashed to simplify the commit.
+=======
+## Using the code base
+
+### Building the code
+
+To build the core repo:
+
+```shell
+cd $ISTIO/istio
+make build
+```
+
+This build command figures out what it needs to do and does not need any input from you.
+
+### Setup bazel and go links
+
+Symlinks bazel artifacts into the standard go structure so standard go
+tooling functions correctly
+
+```shell
+./bin/bazel_to_go.py
+```
+(You can safely ignore some errors like
+`com_github_opencontainers_go_digest Does not exist`)
+
+### Building the containers
+
+This tool builds and publishes Mixer container images to the specified
+registry.
+
+```
+bin/publish-docker-images.sh -h gcr.io/my-project -t my-tag
+```
+
+where
+
+* The `-h` parameter `gcr.io/my-project` is the composition of the registry
+  hostname and the project id. This should be customized.
+* The `-t` parameter `my-tag` is the desired tag. This should be customized.
+
+### Building the Istio manfiests
+
+Use [updateVersion.sh](https://github.com/istio/istio/blob/master/install/updateVersion.sh)
+to generate new manifests with the specified Mixer containers.
+
+```
+cd $ISTIO/istio
+install/updateVersion.sh -xgcr.io/my-project,my-tag
+```
+
+where
+
+* `gcr.io/my-project` is equivalent to the `-h` parameter specified to
+  `publish-docker-images.sh`.
+* `my-tag` is equivalent to the `-t` parameter specified to
+  `publish-docker-images.sh`.
+* `-x` and `,` and the parameters are not delimited by a space.
+
+### Cleaning outputs
+
+You can delete any build artifacts with:
+
+```shell
+make clean
+```
+### Running tests
+
+You can run all the available tests with:
+
+```shell
+make test
+```
+### Getting coverage numbers
+
+You can get the current unit test coverage numbers on your local repo by going to the top of the repo and entering:
+
+```shell
+make coverage
+```
+
+### Auto-formatting source code
+
+You can automatically format the source code and BUILD files to follow our conventions by going to the
+top of the repo and entering:
+
+```shell
+make fmt
+```
+
+### Running the linters
+
+You can run all the linters we require on your local repo by going to the top of the repo and entering:
+
+```shell
+make lint
+# To run only on your local changes
+bin/linters.sh -s HEAD^
+```
+
+### Source file dependencies
+
+You can keep track of dependencies between sources using:
+
+```shell
+make gazelle
+```
+
+### Race detection tests
+
+You can run the test suite using the Go race detection tools using:
+
+```shell
+make racetest
+```
+
+### Adding dependencies
+
+It will occasionally be necessary to add a new external dependency to the system
+Dependencies are maintained in the [WORKSPACE](https://github.com/istio/istio/blob/master/WORKSPACE)
+file. To add a new dependency, please append to the bottom on the file. A dependency
+can be added manually, or via [wtool](https://github.com/bazelbuild/rules_go/blob/master/go/tools/wtool/main.go).
+
+All dependencies:
+- *MUST* be specified in terms of commit SHA (vs release tag).
+- *MUST* be annotated with the commit date and an explanation for the choice of
+commit. Annotations *MUST* follow the `commit` param as a comment field.
+- *SHOULD* be targeted at a commit that corresponds to a stable release of the
+library. If the library does not provide regular releases, etc., pulling from a
+known good recent commit is acceptable.
+
+Examples:
+
+```shell
+new_go_repository(
+    name = "org_golang_google_grpc",
+    commit = "708a7f9f3283aa2d4f6132d287d78683babe55c8", # Dec 5, 2016 (v1.0.5)
+    importpath = "google.golang.org/grpc",
+)
+```
+
+```shell
+git_repository(
+    name = "org_pubref_rules_protobuf",
+    commit = "b0acb9ecaba79716a36fdadc0bcc47dedf6b711a", # Nov 28 2016 (importmap support for gogo_proto_library)
+    remote = "https://github.com/pubref/rules_protobuf",
+)
+```
+
+
+### About testing
+
+Before sending pull requests you should at least make sure your changes have
+passed both unit and integration tests. We only merge pull requests when
+**all** tests are passing.
+
+* Unit tests should be fully hermetic
+  - Only access resources in the test binary.
+* All packages and any significant files require unit tests.
+* The preferred method of testing multiple scenarios or input is
+  [table driven testing](https://github.com/golang/go/wiki/TableDrivenTests)
+* Concurrent unit test runs must pass.
+
+
+## Collection of scripts and notes for developing Istio
+
+For local development (building from source and running the major components) on Ubuntu/raw VM:
+
+Assuming you did (once):
+1. [Install bazel](https://bazel.build/versions/master/docs/install-ubuntu.html), note that as of this writing Bazel needs the `openjdk-8-jdk` VM (you might need to uninstall or get out of the way the `ibm-java80-jdk` that comes by default with GCE for instance)
+2. Install required packages: `sudo apt-get install make openjdk-8-jdk libtool m4 autoconf uuid-dev cmake golang-go`
+3. Get the source trees
+   ```bash
+   mkdir github
+   cd github/
+   git clone https://github.com/istio/istio.git
+   ```
+4. You can then use
+   - [update_all](update_all) : script to build from source
+   - [setup_run](setup_run) : run locally
+   - [fortio](https://github.com/istio/fortio/) (φορτίο) : load testing and minimal echo http and grpc server
+   - And an unrelated tool to aggregate [GitHub Contributions](githubContrib/) statistics.
+5. And run things like
+   ```bash
+   # Test the echo server:
+   curl -v http://localhost:8080/
+   # Test through the proxy:
+   curl -v http://localhost:9090/echo
+   # Add a rule locally (simply drop the file or exercise the API:)
+   curl -v  http://localhost:9094/api/v1/scopes/global/subjects/foo.svc.cluster.local/rules --data-binary @quota.yaml -X PUT -H "Content-Type: application/yaml"
+   # Test under some load:
+   fortio load -qps 2000 http://localhost:9090/echo
+
+   ```
+   Note that this is done for you by [setup_run](setup_run) but to use the correct go environment:
+   ```bash
+   cd mixer/
+   source bin/use_bazel_go.sh
+   ```
