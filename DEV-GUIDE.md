@@ -287,7 +287,7 @@ to generate new manifests with mixer, pilot, and ca_cert custom built containers
 
 ```
 cd $ISTIO/istio
-install/updateVersion.sh -a${HUB},${TAG}
+install/updateVersion.sh -xgcr.io/my-project,my-tag
 ```
 
 ### Cleaning outputs
@@ -397,7 +397,9 @@ passed both unit and integration tests. We only merge pull requests when
 
 ## Collection of scripts and notes for developing Istio
 
-For local development (building from source and running the major components of the data path) on Ubuntu/raw VM:
+## Collection of scripts and notes for developing Istio
+
+For local development (building from source and running the major components) on Ubuntu/raw VM:
 
 Assuming you did (once):
 1. [Install bazel](https://bazel.build/versions/master/docs/install-ubuntu.html), note that as of this writing Bazel needs the `openjdk-8-jdk` VM (you might need to uninstall or get out of the way the `ibm-java80-jdk` that comes by default with GCE for instance)
