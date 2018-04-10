@@ -139,17 +139,22 @@ func TestBuilder_BuildAttributesGeneratorWithEnvVar(t *testing.T) {
 		name          string
 		clientFactory *fakeK8sBuilder
 		conf          adapter.Config
+		path          string
+		wantPath      string
 		wantOK        bool
 	}{
-		{"success", &fakeK8sBuilder{}, &testConf, true},
-	}
-
-	wantPath := "/want/kubeconfig"
-	if err := os.Setenv("KUBECONFIG", wantPath); err != nil {
-		t.Fatalf("Could not set KUBECONFIG environment var")
+		{"success", &fakeK8sBuilder{}, &testConf, "/want/kubeconfig",
+			"/want/kubeconfig", true},
+		{"success", &fakeK8sBuilder{}, &testConf, "/want/kubeconfig,/want/kubeconfig2",
+			"/want/kubeconfig2", true},
 	}
 
 	for _, v := range tests {
+
+		if err := os.Setenv("KUBECONFIG", v.path); err != nil {
+			t.Fatalf("Could not set KUBECONFIG environment var")
+		}
+
 		t.Run(v.name, func(t *testing.T) {
 			b := newBuilder(v.clientFactory.build)
 			b.SetAdapterConfig(v.conf)
@@ -161,8 +166,9 @@ func TestBuilder_BuildAttributesGeneratorWithEnvVar(t *testing.T) {
 				if gotOK != v.wantOK {
 					t.Fatalf("Got %v, Want %v", err, v.wantOK)
 				}
-				if v.clientFactory.calledPath != wantPath {
-					t.Errorf("Bad kubeconfig path; got %s, want %s", v.clientFactory.calledPath, wantPath)
+				if v.clientFactory.calledPath != v.wantPath {
+					t.Errorf("Bad kubeconfig path; got %s, want %s",
+						v.clientFactory.calledPath, v.wantPath)
 				}
 			}
 		})
