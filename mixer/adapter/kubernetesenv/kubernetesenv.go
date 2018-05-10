@@ -81,7 +81,7 @@ type (
 	}
 
 	handler struct {
-		pods   cacheController
+		pods   []cacheController
 		env    adapter.Env
 		params *config.Params
 	}
@@ -138,6 +138,8 @@ func (b *builder) Build(ctx context.Context, env adapter.Env) (adapter.Handler, 
 	paramsProto := b.adapterConfig
 	stopChan := make(chan struct{})
 	refresh := paramsProto.CacheRefreshDuration
+	var controllers []cacheController
+
 	path, exists := os.LookupEnv("KUBECONFIG")
 	if !exists {
 		path = paramsProto.KubeconfigPath
@@ -149,28 +151,32 @@ func (b *builder) Build(ctx context.Context, env adapter.Env) (adapter.Handler, 
 	// provide this basic functionality before.
 	b.Lock()
 	defer b.Unlock()
-	controller, found := b.controllers[path]
-	if !found {
-		clientset, err := b.newClientFn(path, env)
-		if err != nil {
-			return nil, fmt.Errorf("could not build kubernetes client: %v", err)
+	for _, kc := range strings.Split(path, ",") {
+		controller, found := b.controllers[kc]
+		if !found {
+
+			clientset, err := b.newClientFn(kc, env)
+			if err != nil {
+				return nil, fmt.Errorf("could not build kubernetes client: %v", err)
+			}
+			controller = newCacheController(clientset, refresh)
+			env.ScheduleDaemon(func() { controller.Run(stopChan) })
+			// ensure that any request is only handled after
+			// a sync has occurred
+			if success := cache.WaitForCacheSync(stopChan, controller.HasSynced); !success {
+				stopChan <- struct{}{}
+				return nil, errors.New("cache sync failure")
+			}
 		}
-		controller = newCacheController(clientset, refresh)
-		env.ScheduleDaemon(func() { controller.Run(stopChan) })
-		// ensure that any request is only handled after
-		// a sync has occurred
-		env.Logger().Infof("Waiting for kubernetes cache sync...")
-		if success := cache.WaitForCacheSync(stopChan, controller.HasSynced); !success {
-			stopChan <- struct{}{}
-			return nil, errors.New("cache sync failure")
-		}
-		env.Logger().Infof("Cache sync successful.")
-		b.controllers[path] = controller
+		controllers = append(controllers, controller)
+		b.controllers[kc] = controller
 	}
+
+	env.Logger().Infof("Cache sync successful")
 
 	return &handler{
 		env:    env,
-		pods:   controller,
+		pods:   controllers,
 		params: paramsProto,
 	}, nil
 }
@@ -227,7 +233,15 @@ func (h *handler) Close() error {
 
 func (h *handler) findPod(uid string) (*v1.Pod, bool) {
 	podKey := keyFromUID(uid)
-	pod, found := h.pods.GetPod(podKey)
+	var found bool
+	var pod *v1.Pod
+	for _, controller := range h.pods {
+		pod, found = controller.GetPod(podKey)
+		if found {
+			break
+		}
+	}
+
 	if !found {
 		h.env.Logger().Warningf("could not find pod for (uid: %s, key: %s)", uid, podKey)
 	}
