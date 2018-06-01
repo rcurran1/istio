@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"k8s.io/api/core/v1"
+	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8s "k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth" // needed for auth
 	"k8s.io/client-go/tools/cache"
@@ -81,7 +82,7 @@ type (
 	}
 
 	handler struct {
-		pods   cacheController
+		pods   []cacheController
 		env    adapter.Env
 		params *config.Params
 	}
@@ -136,8 +137,8 @@ func (b *builder) Validate() (ce *adapter.ConfigErrors) {
 
 func (b *builder) Build(ctx context.Context, env adapter.Env) (adapter.Handler, error) {
 	paramsProto := b.adapterConfig
-	stopChan := make(chan struct{})
-	refresh := paramsProto.CacheRefreshDuration
+	var controllers []cacheController
+
 	path, exists := os.LookupEnv("KUBECONFIG")
 	if !exists {
 		path = paramsProto.KubeconfigPath
@@ -155,24 +156,97 @@ func (b *builder) Build(ctx context.Context, env adapter.Env) (adapter.Handler, 
 		if err != nil {
 			return nil, fmt.Errorf("could not build kubernetes client: %v", err)
 		}
-		controller = newCacheController(clientset, refresh)
-		env.ScheduleDaemon(func() { controller.Run(stopChan) })
-		// ensure that any request is only handled after
-		// a sync has occurred
-		env.Logger().Infof("Waiting for kubernetes cache sync...")
-		if success := cache.WaitForCacheSync(stopChan, controller.HasSynced); !success {
-			stopChan <- struct{}{}
-			return nil, errors.New("cache sync failure")
+
+		controller, err = getNewCacheController(b, clientset, env)
+		if err != nil {
+			return nil, fmt.Errorf("could not create new cache controller: %v", err)
 		}
-		env.Logger().Infof("Cache sync successful.")
+
+		controllers = append(controllers, controller)
 		b.controllers[path] = controller
+
+		remote_controllers, err := createRemoteCacheControllers(b, clientset, env)
+		if err == nil {
+			controllers = append(controllers, remote_controllers...)
+		} else {
+			return nil, fmt.Errorf("failure on creating remote controllers: %v", err)
+		}
+	} else {
+		for key, _ := range b.controllers {
+			controllers = append(controllers, b.controllers[key])
+		}
 	}
 
 	return &handler{
 		env:    env,
-		pods:   controller,
+		pods:   controllers,
 		params: paramsProto,
 	}, nil
+}
+
+func createRemoteCacheControllers(b *builder, clientset k8s.Interface,
+	env adapter.Env) ([]cacheController, error) {
+	var remote_controllers []cacheController
+	var opts meta_v1.ListOptions
+
+	secretNamespace := "istio-system" // TODO: make configurable
+	mcLabel := "istio/multiCluster"
+	opts.LabelSelector = mcLabel + "=true"
+
+	kube_secrets, err := clientset.CoreV1().Secrets(secretNamespace).List(opts)
+	if err != nil {
+		return nil, fmt.Errorf("could not access secrets for namespace: %s error: %v",
+			secretNamespace, err)
+	}
+
+	for _, secret := range kube_secrets.Items {
+		for dataKey, kubeconfig := range secret.Data {
+			config, err := clientcmd.Load(kubeconfig)
+			if err != nil {
+				return nil, fmt.Errorf("could not load kubeconfig for secret error: %v", err)
+			}
+
+			clientConfig := clientcmd.NewDefaultClientConfig(*config,
+				&clientcmd.ConfigOverrides{})
+			rest, err := clientConfig.ClientConfig()
+			if err != nil {
+				return nil, fmt.Errorf("error on ClientConfig access: %v", err)
+			}
+
+			k8sInterface, err := k8s.NewForConfig(rest)
+			if err != nil {
+				return nil, fmt.Errorf("error on NewforConfig access: %v", err)
+			}
+
+			// Create controller for remote cluster
+			controller, err := getNewCacheController(b, k8sInterface, env)
+			remote_controllers = append(remote_controllers, controller)
+			b.controllers[dataKey] = controller
+		}
+	}
+
+	return remote_controllers, nil
+}
+
+func getNewCacheController(b *builder, clientset k8s.Interface,
+	env adapter.Env) (cacheController, error) {
+	paramsProto := b.adapterConfig
+	stopChan := make(chan struct{})
+	refresh := paramsProto.CacheRefreshDuration
+
+	controller := newCacheController(clientset, refresh)
+	env.ScheduleDaemon(func() { controller.Run(stopChan) })
+
+	// ensure that any request is only handled after
+	// a sync has occurred
+	env.Logger().Infof("Waiting for kubernetes cache sync...")
+	if success := cache.WaitForCacheSync(stopChan, controller.HasSynced); !success {
+		stopChan <- struct{}{}
+		return nil, errors.New("cache sync failure")
+	}
+	env.Logger().Infof("Cache sync successful.")
+
+	return controller, nil
 }
 
 func newBuilder(clientFactory clientFactoryFn) *builder {
@@ -227,7 +301,15 @@ func (h *handler) Close() error {
 
 func (h *handler) findPod(uid string) (*v1.Pod, bool) {
 	podKey := keyFromUID(uid)
-	pod, found := h.pods.GetPod(podKey)
+	var found bool
+	var pod *v1.Pod
+	for _, controller := range h.pods {
+		pod, found = controller.GetPod(podKey)
+		if found {
+			break
+		}
+	}
+
 	if !found {
 		h.env.Logger().Debugf("could not find pod for (uid: %s, key: %s)", uid, podKey)
 	}
