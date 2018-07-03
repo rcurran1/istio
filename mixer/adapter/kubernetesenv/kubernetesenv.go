@@ -66,11 +66,11 @@ type (
 		newClientFn   clientFactoryFn
 
 		sync.Mutex
-		controllers map[string]cacheController
+		controllers map[string]map[string]cacheController
 	}
 
 	handler struct {
-		k8sCache cacheController
+		k8sCache map[string]map[string]cacheController
 		env      adapter.Env
 		params   *config.Params
 	}
@@ -82,6 +82,9 @@ type (
 // compile-time validation
 var _ ktmpl.Handler = &handler{}
 var _ ktmpl.HandlerBuilder = &builder{}
+
+// Required for unit test override.
+var getK8sInterface = createK8sInterface
 
 // GetInfo returns the Info associated with this adapter implementation.
 func GetInfo() adapter.Info {
@@ -110,8 +113,9 @@ func (b *builder) Validate() (ce *adapter.ConfigErrors) {
 
 func (b *builder) Build(ctx context.Context, env adapter.Env) (adapter.Handler, error) {
 	paramsProto := b.adapterConfig
-	stopChan := make(chan struct{})
-	refresh := paramsProto.CacheRefreshDuration
+	var controller cacheController
+	var controllers map[string]map[string]cacheController = make(map[string]map[string]cacheController)
+
 	path, exists := os.LookupEnv("KUBECONFIG")
 	if !exists {
 		path = paramsProto.KubeconfigPath
@@ -123,36 +127,89 @@ func (b *builder) Build(ctx context.Context, env adapter.Env) (adapter.Handler, 
 	// provide this basic functionality before.
 	b.Lock()
 	defer b.Unlock()
-	controller, found := b.controllers[path]
+	_, found := b.controllers[path][path]
 	if !found {
 		clientset, err := b.newClientFn(path, env)
 		if err != nil {
 			return nil, fmt.Errorf("could not build kubernetes client: %v", err)
 		}
-		controller = newCacheController(clientset, refresh, env)
-		env.ScheduleDaemon(func() { controller.Run(stopChan) })
-		// ensure that any request is only handled after
-		// a sync has occurred
-		env.Logger().Infof("Waiting for kubernetes cache sync...")
-		if success := cache.WaitForCacheSync(stopChan, controller.HasSynced); !success {
-			stopChan <- struct{}{}
-			return nil, errors.New("cache sync failure")
+
+		controller, err = getNewCacheController(b, clientset, env)
+		if err != nil {
+			return nil, fmt.Errorf("could not create new cache controller: %v", err)
 		}
-		env.Logger().Infof("Cache sync successful.")
-		b.controllers[path] = controller
+		controllers[path] = make(map[string]cacheController)
+		b.controllers[path] = make(map[string]cacheController)
+		controllers[path][path] = controller
+		b.controllers[path][path] = controller
+	} else {
+		for secretName := range b.controllers {
+			controllers[secretName] = make(map[string]cacheController)
+		    for clusterID := range b.controllers[secretName] {
+			    controllers[secretName][clusterID] = b.controllers[secretName][clusterID]
+			}
+		}
 	}
 
-	return &handler{
+	kubeHandler := handler{
 		env:      env,
-		k8sCache: controller,
+		k8sCache: controllers,
 		params:   paramsProto,
-	}, nil
+	}
+
+	// JAJ - looks like we have to start the secret controller here somewhere - although it doesn't seem quite right
+	if err := initMultiClusterController(b, &kubeHandler, path, env); err != nil {
+		return nil, err
+	}
+
+	return &kubeHandler, nil
+}
+
+func createK8sInterface(kubeconfig []byte) (k8s.Interface, error) {
+	config, err := clientcmd.Load(kubeconfig)
+	if err != nil {
+		return nil, fmt.Errorf("could not load kubeconfig for secret error: %v", err)
+	}
+
+	clientConfig := clientcmd.NewDefaultClientConfig(*config, &clientcmd.ConfigOverrides{})
+	rest, err := clientConfig.ClientConfig()
+	if err != nil {
+		return nil, fmt.Errorf("error on ClientConfig access: %v", err)
+	}
+
+	k8sInterface, err := k8s.NewForConfig(rest)
+	if err != nil {
+		return nil, fmt.Errorf("error on NewforConfig access: %v", err)
+	}
+
+	return k8sInterface, nil
+}
+
+func getNewCacheController(b *builder, clientset k8s.Interface,
+	env adapter.Env) (cacheController, error) {
+	paramsProto := b.adapterConfig
+	stopChan := make(chan struct{})
+	refresh := paramsProto.CacheRefreshDuration
+
+	controller := newCacheController(clientset, refresh, env, stopChan)
+	env.ScheduleDaemon(func() { controller.Run(stopChan) })
+
+	// ensure that any request is only handled after
+	// a sync has occurred
+	env.Logger().Infof("Waiting for kubernetes cache sync...")
+	if success := cache.WaitForCacheSync(stopChan, controller.HasSynced); !success {
+		stopChan <- struct{}{}
+		return nil, errors.New("cache sync failure")
+	}
+	env.Logger().Infof("Cache sync successful.")
+
+	return controller, nil
 }
 
 func newBuilder(clientFactory clientFactoryFn) *builder {
 	return &builder{
 		newClientFn:   clientFactory,
-		controllers:   make(map[string]cacheController),
+		controllers:   make(map[string]map[string]cacheController),
 		adapterConfig: conf,
 	}
 }
@@ -189,7 +246,18 @@ func (h *handler) Close() error {
 
 func (h *handler) findPod(uid string) (*v1.Pod, bool) {
 	podKey := keyFromUID(uid)
-	pod, found := h.k8sCache.Pod(podKey)
+	var found bool
+	var pod *v1.Pod
+
+	for secretName := range h.k8sCache {
+	    for _, controller := range h.k8sCache[secretName] {
+		    pod, found = controller.Pod(podKey)
+		    if found {
+			    break
+		    }
+		}
+	}
+
 	if !found {
 		h.env.Logger().Debugf("could not find pod for (uid: %s, key: %s)", uid, podKey)
 	}
@@ -243,12 +311,17 @@ func (h *handler) fillDestinationAttrs(p *v1.Pod, port int64, o *ktmpl.Output, p
 	if len(p.Status.HostIP) > 0 {
 		o.SetDestinationHostIp(net.ParseIP(p.Status.HostIP))
 	}
-	if wl, found := h.k8sCache.Workload(p); found {
-		o.SetDestinationWorkloadUid(wl.uid)
-		o.SetDestinationWorkloadName(wl.name)
-		o.SetDestinationWorkloadNamespace(wl.namespace)
-		if len(wl.selfLinkURL) > 0 {
-			o.SetDestinationOwner(wl.selfLinkURL)
+	for secretName := range h.k8sCache {
+	    for _, controller := range h.k8sCache[secretName] {
+		    if wl, found := controller.Workload(p); found {
+			    o.SetDestinationWorkloadUid(wl.uid)
+			    o.SetDestinationWorkloadName(wl.name)
+			    o.SetDestinationWorkloadNamespace(wl.namespace)
+			    if len(wl.selfLinkURL) > 0 {
+				    o.SetDestinationOwner(wl.selfLinkURL)
+			    }
+			    break
+			}
 		}
 	}
 	if cn := findContainer(p, port); cn != "" {
@@ -275,12 +348,17 @@ func (h *handler) fillSourceAttrs(p *v1.Pod, o *ktmpl.Output, params *config.Par
 	if len(p.Status.HostIP) > 0 {
 		o.SetSourceHostIp(net.ParseIP(p.Status.HostIP))
 	}
-	if wl, found := h.k8sCache.Workload(p); found {
-		o.SetSourceWorkloadUid(wl.uid)
-		o.SetSourceWorkloadName(wl.name)
-		o.SetSourceWorkloadNamespace(wl.namespace)
-		if len(wl.selfLinkURL) > 0 {
-			o.SetSourceOwner(wl.selfLinkURL)
+	for secretName := range h.k8sCache {
+	    for _, controller := range h.k8sCache[secretName] {
+		    if wl, found := controller.Workload(p); found {
+			    o.SetSourceWorkloadUid(wl.uid)
+			    o.SetSourceWorkloadName(wl.name)
+			    o.SetSourceWorkloadNamespace(wl.namespace)
+			    if len(wl.selfLinkURL) > 0 {
+				    o.SetSourceOwner(wl.selfLinkURL)
+			    }
+			    break
+			}
 		}
 	}
 }
@@ -292,4 +370,34 @@ func newKubernetesClient(kubeconfigPath string, env adapter.Env) (k8s.Interface,
 		return nil, fmt.Errorf("could not retrieve kubeconfig: %v", err)
 	}
 	return k8s.NewForConfig(config)
+}
+
+// initMultiClusterController initializes multi cluster controller
+// currently implemented only for kubernetes registries
+func initMultiClusterController(b *builder, kubeHandler *handler, kubeconfig string, env adapter.Env) (err error) {
+// func (s *Server) initMultiClusterController(args *Args) (err error) {
+    kubeClient, err := newKubernetesClient(kubeconfig, env)
+	if err != nil  {
+		return fmt.Errorf("could not create K8s client: %v", err)
+	}
+	// TODO JAJ - we might need a clusterStore to check if clusters have already been added.  Need to
+	// decide where this structure should hang off of.
+	// Start secret controller which watches for runtime secret Object changes and adds secrets dynamically
+	err = StartSecretController(b,
+		kubeHandler,
+		kubeClient,
+		/* s.ServiceController,
+		 s.EnvoyXdsServer,
+		args.Config.ClusterRegistriesNamespace,
+		args.Config.ControllerOptions.ResyncPeriod,
+		args.Config.ControllerOptions.WatchedNamespace,
+		args.Config.ControllerOptions.DomainSuffix)
+		*/
+		"istio-system",
+		 60*time.Second,
+		"istio-system",
+		"cluster.local")
+
+	//JAJ }
+	return
 }

@@ -40,10 +40,12 @@ type (
 		Pod(string) (*v1.Pod, bool)
 		Workload(*v1.Pod) (workload, bool)
 		HasSynced() bool
+		StopControlChannel()
 	}
 
 	controllerImpl struct {
 		env           adapter.Env
+		stopChan      chan struct{}
 		pods          cache.SharedIndexInformer
 		appsv1RS      cache.SharedIndexInformer
 		appsv1beta2RS cache.SharedIndexInformer
@@ -71,11 +73,12 @@ func podIP(obj interface{}) ([]string, error) {
 // Responsible for setting up the cacheController, based on the supplied client.
 // It configures the index informer to list/watch k8sCache and send update events
 // to a mutations channel for processing (in this case, logging).
-func newCacheController(clientset kubernetes.Interface, refreshDuration time.Duration, env adapter.Env) cacheController {
+func newCacheController(clientset kubernetes.Interface, refreshDuration time.Duration, env adapter.Env, stopChan chan struct{}) cacheController {
 	namespace := "" // todo: address unparam linter issue
 
 	return &controllerImpl{
 		env: env,
+		stopChan: stopChan,
 		pods: cache.NewSharedIndexInformer(
 			&cache.ListWatch{
 				ListFunc: func(opts metav1.ListOptions) (runtime.Object, error) {
@@ -131,6 +134,11 @@ func newCacheController(clientset kubernetes.Interface, refreshDuration time.Dur
 			cache.Indexers{},
 		),
 	}
+}
+
+func (c *controllerImpl) StopControlChannel() {
+	close(c.stopChan)
+	<-c.stopChan
 }
 
 func (c *controllerImpl) HasSynced() bool {
