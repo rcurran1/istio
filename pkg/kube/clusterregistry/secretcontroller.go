@@ -14,7 +14,6 @@
 
 package clusterregistry
 
-
 import (
 	"fmt"
 	"time"
@@ -29,6 +28,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/workqueue"
+
 	//"istio.io/istio/pilot/pkg/serviceregistry/kube"
 	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/log"
@@ -43,21 +43,24 @@ var (
 	serverStartTime time.Time
 )
 
-type AddClusterFunc func(clientset kubernetes.Interface, dataKey string) (error)
-type RmClusterFunc func(dataKey string) (error)
+// Required for unit test override.
+var loadKubeConfig = clientcmd.Load
+
+type AddClusterFunc func(clientset kubernetes.Interface, dataKey string) error
+type RmClusterFunc func(dataKey string) error
 
 // Controller is the controller implementation for Secret resources
 type Controller struct {
-	kubeclientset     kubernetes.Interface
-	namespace         string
-	cs                *ClusterStore
-	queue             workqueue.RateLimitingInterface
-	informer          cache.SharedIndexInformer
-	watchedNamespace  string
-	domainSufix       string
-	resyncInterval    time.Duration
-	addcallback       AddClusterFunc
-	rmcallback        RmClusterFunc
+	kubeclientset    kubernetes.Interface
+	namespace        string
+	cs               *ClusterStore
+	queue            workqueue.RateLimitingInterface
+	informer         cache.SharedIndexInformer
+	watchedNamespace string
+	domainSufix      string
+	resyncInterval   time.Duration
+	addcallback      AddClusterFunc
+	rmcallback       RmClusterFunc
 }
 
 // NewController returns a new secret controller
@@ -85,13 +88,13 @@ func NewController(
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
 
 	controller := &Controller{
-		kubeclientset:     kubeclientset,
-		namespace:         namespace,
-		cs:                cs,
-		informer:          secretsInformer,
-		queue:             queue,
-		addcallback:       addfn,
-		rmcallback:        rmfn,
+		kubeclientset: kubeclientset,
+		namespace:     namespace,
+		cs:            cs,
+		informer:      secretsInformer,
+		queue:         queue,
+		addcallback:   addfn,
+		rmcallback:    rmfn,
 	}
 
 	log.Info("Setting up event handlers")
@@ -131,7 +134,6 @@ func (c *Controller) Run(stopCh <-chan struct{}) {
 		utilruntime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
 		return
 	}
-
 	wait.Until(c.runWorker, 5*time.Second, stopCh)
 }
 
@@ -198,21 +200,18 @@ func (c *Controller) addMemberCluster(secretName string, s *corev1.Secret) {
 	defer c.cs.StoreLock.Unlock()
 
 	// Check if there is already a cluster member with the specified
-
 	for clusterID, kubeConfig := range s.Data {
 		// custerID must be unique even across multiple secrets
-
 		if _, ok := c.cs.Rc[clusterID]; !ok {
 
 			// Disregard it if it's empty
-
 			if len(kubeConfig) == 0 {
 				log.Infof("Data '%s' in the secret %s in namespace %s is empty, and disregarded ",
 					clusterID, secretName, s.ObjectMeta.Namespace)
 				continue
 			}
 
-			clientConfig, err := clientcmd.Load(kubeConfig)
+			clientConfig, err := loadKubeConfig(kubeConfig)
 
 			if err != nil {
 				log.Infof("Data '%s' in the secret %s in namespace %s is not a kubeconfig: %v",
@@ -227,13 +226,11 @@ func (c *Controller) addMemberCluster(secretName string, s *corev1.Secret) {
 			client, _ := kube.CreateInterfaceFromClusterConfig(clientConfig)
 			err = c.addcallback(client, clusterID)
 			// Expect callback to properly log appropriate positive and negative events.
-
 			if err != nil {
 				log.Errorf("Error durring create of clusterID: %s %v", clusterID, err)
 			}
 
 		} else {
-
 			log.Infof("Cluster %s in the secret %s in namespace %s already exists",
 				clusterID, secretName, s.ObjectMeta.Namespace)
 		}
@@ -245,29 +242,19 @@ func (c *Controller) addMemberCluster(secretName string, s *corev1.Secret) {
 func (c *Controller) deleteMemberCluster(secretName string) {
 
 	c.cs.StoreLock.Lock()
-
 	defer c.cs.StoreLock.Unlock()
 
 	// Check if there is a cluster member with the specified name
-
 	for clusterID, cluster := range c.cs.Rc {
-
 		if cluster.FromSecret == secretName {
-
 			log.Infof("Deleting cluster member: %s", clusterID)
-
 			err := c.rmcallback(clusterID)
-
 			if err != nil {
 				// Expect the callback function to properly document what was amiss
 				log.Errorf("Error durring delete: %s %v", clusterID, err)
 			}
 			delete(c.cs.Rc, clusterID)
-
 		}
-
 	}
-
 	log.Infof("Number of clusters in the cluster store: %d", len(c.cs.Rc))
-
 }

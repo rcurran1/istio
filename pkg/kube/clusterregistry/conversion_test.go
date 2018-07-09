@@ -93,7 +93,7 @@ func TestGetPilotClusters(t *testing.T) {
 			testName: "3 out of 3 Pilot in the store",
 			cs: &ClusterStore{
 				Rc: map[string]*RemoteCluster{
-					"cluster1":{
+					"cluster1": {
 						Cluster: &k8s_cr.Cluster{
 							ObjectMeta: metav1.ObjectMeta{
 								Name: "fakePilot1",
@@ -101,7 +101,7 @@ func TestGetPilotClusters(t *testing.T) {
 						},
 						Client: &clientcmdapi.Config{},
 					},
-					"cluster2":{
+					"cluster2": {
 						Cluster: &k8s_cr.Cluster{
 							ObjectMeta: metav1.ObjectMeta{
 								Name: "fakePilot2",
@@ -109,7 +109,7 @@ func TestGetPilotClusters(t *testing.T) {
 						},
 						Client: &clientcmdapi.Config{},
 					},
-					"cluster3":{
+					"cluster3": {
 						Cluster: &k8s_cr.Cluster{
 							ObjectMeta: metav1.ObjectMeta{
 								Name: "fakePilot3",

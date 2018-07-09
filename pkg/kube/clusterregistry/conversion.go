@@ -1,4 +1,4 @@
-// Copyright 2017 Istio Authors
+// Copyright 2018 Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -27,13 +27,13 @@ import (
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	k8s_cr "k8s.io/cluster-registry/pkg/apis/clusterregistry/v1alpha1"
 
-	"istio.io/istio/pkg/log"
 	"istio.io/istio/pilot/pkg/serviceregistry"
+	"istio.io/istio/pkg/log"
 )
 
 // annotations for a Cluster
 const (
-	// The cluster's platform: Kubernetes, Consul, Eureka, CloudFoundry
+	// The cluster's platform: Kubernetes, Consul, CloudFoundry
 	ClusterPlatform = "config.istio.io/platform"
 
 	// The cluster's access configuration stored in k8s Secret object
@@ -42,35 +42,12 @@ const (
 	ClusterAccessConfigSecretNamespace = "config.istio.io/accessConfigSecretNamespace"
 )
 
-// borrowed from Pilot to eliminate dependency TODO: use a callback function to validate for each componnet.
-type ServiceRegistry string
-
-const (
-	// MockRegistry is a service registry that contains 2 hard-coded test services
-	MockRegistry ServiceRegistry = "Mock"
-	// ConfigRegistry is a service registry that listens for service entries in a backing ConfigStore
-	ConfigRegistry ServiceRegistry = "Config"
-	// KubernetesRegistry is a service registry backed by k8s API server
-	KubernetesRegistry ServiceRegistry = "Kubernetes"
-	// ConsulRegistry is a service registry backed by Consul
-	ConsulRegistry ServiceRegistry = "Consul"
-	// EurekaRegistry is a service registry backed by Eureka
-	EurekaRegistry ServiceRegistry = "Eureka"
-	// CloudFoundryRegistry is a service registry backed by Cloud Foundry.
-	CloudFoundryRegistry ServiceRegistry = "CloudFoundry"
-)
-
-// Metadata defines a struct used as a key
-type Metadata struct {
-	Name, Namespace string
-}
-
 // RemoteCluster defines cluster structZZ
 type RemoteCluster struct {
-	Cluster        *k8s_cr.Cluster
-	FromSecret     string
-	Client         *clientcmdapi.Config
-	ClusterStatus  string
+	Cluster       *k8s_cr.Cluster
+	FromSecret    string
+	Client        *clientcmdapi.Config
+	ClusterStatus string
 }
 
 // ClusterStore is a collection of clusters
@@ -86,11 +63,6 @@ func NewClustersStore() *ClusterStore {
 		Rc: rc,
 	}
 }
-
-// GetClientAccessConfigs returns map of collected client configs
-//func (cs *ClusterStore) GetClientAccessConfigs() map[string]clientcmdapi.Config {
-//	return cs.clientConfigs
-//}
 
 // GetClusterAccessConfig returns the access config file of a cluster
 func (cs *ClusterStore) GetClusterAccessConfig(cluster *k8s_cr.Cluster) *clientcmdapi.Config {
@@ -209,8 +181,6 @@ func validateCluster(cluster *k8s_cr.Cluster) (err error) {
 		// Currently only supporting kubernetes registry,
 		case serviceregistry.KubernetesRegistry:
 		case serviceregistry.ConsulRegistry:
-			fallthrough
-		case serviceregistry.EurekaRegistry:
 			fallthrough
 		case serviceregistry.CloudFoundryRegistry:
 			fallthrough
